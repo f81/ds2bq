@@ -20,6 +20,16 @@ func DecodeGCSObject(r io.Reader) (*GCSObject, error) {
 	return obj, nil
 }
 
+func DecodeGCSPubSubObject(r io.Reader) (*GCSPubSubObject, error) {
+	decoder := json.NewDecoder(r)
+	var obj *GCSPubSubObject
+	err := decoder.Decode(&obj)
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 // DecodeGCSObjectToBQJobReq decodes a GCSObjectToBQJobReq from r.
 func DecodeGCSObjectToBQJobReq(r io.Reader) (*GCSObjectToBQJobReq, error) {
 	decoder := json.NewDecoder(r)
@@ -57,6 +67,30 @@ func ReceiveOCNHandleFunc(bucketName, queueName, path string, kindNames []string
 	}
 }
 
+func ReceivePubSubNotificationHandlerFunc(bucketName, queueName, path string, kindNames []string) http.HandlerFunc {
+	// TODO: processWithContext
+	return func(w http.ResponseWriter, r *http.Request) {
+		c := appengine.NewContext(r)
+
+		obj, err := DecodeGCSPubSubObject(r.Body)
+		if err != nil {
+			log.Errorf(c, "ds2bq: failed to decode request: %s", err)
+			return
+		}
+		defer r.Body.Close()
+
+		if !obj.IsImportTarget(c, r, bucketName, kindNames) {
+			return
+		}
+
+		err = ReceiveOCNPubSub(c, obj, queueName, path)
+		if err != nil {
+			log.Errorf(c, "ds2bq: failed to receive OCN: %s", err)
+			return
+		}
+	}
+}
+
 // ImportBigQueryHandleFunc returns a http.HandlerFunc that imports GCSObject to BigQuery.
 func ImportBigQueryHandleFunc(datasetID string) http.HandlerFunc {
 	// TODO: processWithContext
@@ -71,6 +105,27 @@ func ImportBigQueryHandleFunc(datasetID string) http.HandlerFunc {
 		defer r.Body.Close()
 
 		err = insertImportJob(c, req, datasetID)
+		if err != nil {
+			log.Errorf(c, "ds2bq: failed to import BigQuery: %s", err)
+			return
+		}
+	}
+}
+
+// ImportBigQueryHandleFunc returns a http.HandlerFunc that imports GCSObject to BigQuery with partition config.
+func ImportBigQueryWithConfHandlerFunc(datasetID string, configMap *BQConfigMap) http.HandlerFunc {
+	// TODO: processWithContext
+	return func(w http.ResponseWriter, r *http.Request) {
+		c := appengine.NewContext(r)
+
+		req, err := DecodeGCSObjectToBQJobReq(r.Body)
+		if err != nil {
+			log.Errorf(c, "ds2bq: failed to decode request: %s", err)
+			return
+		}
+		defer r.Body.Close()
+
+		err = insertImportJobWithBQConfig(c, req, datasetID, configMap)
 		if err != nil {
 			log.Errorf(c, "ds2bq: failed to import BigQuery: %s", err)
 			return

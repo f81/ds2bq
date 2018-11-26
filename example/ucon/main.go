@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/favclip/ds2bq"
+	"github.com/f81/ds2bq"
 	"github.com/favclip/ucon"
 	"github.com/favclip/ucon/swagger"
 	"google.golang.org/appengine"

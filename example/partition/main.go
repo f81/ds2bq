@@ -28,6 +28,10 @@ func init() {
 	bucketName := "ds2bqexample-nethttp"
 	datasetID := "datastore_imports"
 	targetKinds := []string{"Article", "User"}
-	http.HandleFunc(apiReceiveOCN, ds2bq.ReceiveOCNHandleFunc(bucketName, queueName, tqImportBigQuery, targetKinds)) // from GCS, This API must not requires admin role.
-	http.HandleFunc(tqImportBigQuery, ds2bq.ImportBigQueryHandleFunc(datasetID))
+	http.HandleFunc(apiReceiveOCN, ds2bq.ReceivePubSubNotificationHandlerFunc(bucketName, queueName, tqImportBigQuery, targetKinds)) // from GCS, via pubsub
+
+	bqPartitionConf := &ds2bq.BQConfigMap{
+		"user": {Kind: "user", TimePartitioningField: "time", ClusteringFields: []string{"department", "name"}},
+	}
+	http.HandleFunc(tqImportBigQuery, ds2bq.ImportBigQueryWithConfHandlerFunc(datasetID, bqPartitionConf))
 }

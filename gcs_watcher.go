@@ -149,6 +149,27 @@ func ReceiveOCN(c context.Context, obj *GCSObject, queueName, path string) error
 	return err
 }
 
+// ReceiveOCN is Process payload of Object Change Notification
+func ReceiveOCNPubSub(c context.Context, obj *GCSPubSubObject, queueName, path string) error {
+	req := obj.ToBQJobReq()
+	b, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	h := make(http.Header)
+	h.Set("Content-Type", "application/json")
+	t := &taskqueue.Task{
+		Path:    path,
+		Payload: b,
+		Header:  h,
+		Method:  "POST",
+	}
+
+	_, err = taskqueue.Add(c, t, queueName)
+	return err
+}
+
 func insertImportJob(c context.Context, req *GCSObjectToBQJobReq, datasetID string) error {
 	log.Infof(c, "ds2bq: bucket: %s, filePath: %s, timeCreated: %s", req.Bucket, req.FilePath, req.TimeCreated)
 
@@ -183,6 +204,79 @@ func insertImportJob(c context.Context, req *GCSObjectToBQJobReq, datasetID stri
 				SourceFormat:     "DATASTORE_BACKUP",
 				WriteDisposition: "WRITE_TRUNCATE",
 			},
+		},
+	}
+
+	_, err = bqs.Jobs.Insert(appengine.AppID(c), job).Do()
+	if err != nil {
+		log.Warningf(c, "ds2bq: unexpected error in HandleBackupToBQJob: %s", err)
+		return nil
+	}
+
+	return nil
+}
+
+type BQConfig struct {
+	Kind string
+	TimePartitioningField string
+	ClusteringFields []string
+}
+
+type BQConfigMap map[string]BQConfig
+
+func (b *BQConfigMap) Set(conf BQConfig) {
+	(*b)[conf.Kind] = conf
+}
+
+func insertImportJobWithBQConfig(c context.Context, req *GCSObjectToBQJobReq, datasetID string, bqConf *BQConfigMap) error {
+	log.Infof(c, "ds2bq: bucket: %s, filePath: %s, timeCreated: %s", req.Bucket, req.FilePath, req.TimeCreated)
+
+	if req.Bucket == "" || req.FilePath == "" || req.KindName == "" {
+		log.Warningf(c, "ds2bq: unexpected parameters %#v", req)
+		return nil
+	}
+
+	client := &http.Client{
+		Transport: &oauth2.Transport{
+			Source: google.AppEngineTokenSource(c, bigquery.BigqueryScope),
+			Base:   &urlfetch.Transport{Context: c},
+		},
+	}
+
+	bqs, err := bigquery.New(client)
+	if err != nil {
+		return err
+	}
+
+	loadConf := bigquery.JobConfigurationLoad{
+		SourceUris: []string{
+			fmt.Sprintf("gs://%s/%s", req.Bucket, req.FilePath),
+		},
+		DestinationTable: &bigquery.TableReference{
+			ProjectId: appengine.AppID(c),
+			DatasetId: datasetID,
+			TableId:   req.KindName,
+		},
+		SourceFormat:     "DATASTORE_BACKUP",
+		WriteDisposition: "WRITE_TRUNCATE",
+	}
+
+	if v, ok := (*bqConf)[req.KindName]; ok {
+		if len(v.TimePartitioningField) > 0 {
+			loadConf.TimePartitioning  = &bigquery.TimePartitioning{
+				Field:v.TimePartitioningField,
+			}
+			if len(v.ClusteringFields) > 0 {
+				loadConf.Clustering = &bigquery.Clustering{
+					Fields:v.ClusteringFields,
+				}
+			}
+		}
+	}
+
+	job := &bigquery.Job{
+		Configuration: &bigquery.JobConfiguration{
+			Load: &loadConf,
 		},
 	}
 

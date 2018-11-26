@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/favclip/ucon"
@@ -302,4 +303,116 @@ func (s *gcsWatcherService) HandleBackupToBQJob(c context.Context, req *GCSObjec
 	}
 
 	return nil
+}
+
+type GCSPubSubObject struct {
+	Message      Message `json:"message"`
+	Subscription string  `json:"subscription"`
+}
+
+type Message struct {
+	Attributes  Attributes `json:"attributes"`
+	Data        string     `json:"data"`
+	MessageID   string     `json:"messageId"`
+	PublishTime time.Time  `json:"publishTime"`
+}
+
+type Attributes struct {
+	BucketID           string    `json:"bucketId"`
+	EventTime          time.Time `json:"eventTime"`
+	EventType          string    `json:"eventType"`
+	NotificationConfig string    `json:"notificationConfig"`
+	ObjectGeneration   string    `json:"objectGeneration"`
+	ObjectID           string    `json:"objectId"`
+	PayloadFormat      string    `json:"payloadFormat"`
+}
+
+// IsImportTarget reports whether the GCSObject is an import target.
+func (obj *GCSPubSubObject) IsImportTarget(c context.Context, r *http.Request, bucketName string, kindNames []string) bool {
+	bucket := obj.Message.Attributes.BucketID
+	name := obj.Message.Attributes.ObjectID
+	if bucketName != "" && bucket != bucketName {
+		log.Infof(c, "ds2bq: %s is unexpected bucket", bucket)
+		return false
+	}
+	if obj.ExtractKindName() == "" {
+		log.Infof(c, "ds2bq: this is not backup file: %s", name)
+		return false
+	}
+	if !obj.IsRequiredKind(kindNames) {
+		log.Infof(c, "ds2bq: %s is not required kind", obj.ExtractKindName())
+		return false
+	}
+	log.Infof(c, "ds2bq: %s should imports", name)
+	return true
+}
+
+// ExtractKindName extracts kind name from the object name.
+func (obj *GCSPubSubObject) ExtractKindName() string {
+	f := obj.Message.Attributes.ObjectID
+	if id := obj.extractKindNameForDatastoreAdmin(f); len(id) > 0 {
+		return id
+	}
+	if id := obj.extractKindNameForDatastoreExport(f); len(id) > 0 {
+		return id
+	}
+	return ""
+}
+
+// IsRequiredKind reports whether the GCSObject is related required kind.
+func (obj *GCSPubSubObject) IsRequiredKind(requires []string) bool {
+	kindName := obj.ExtractKindName()
+	for _, k := range requires {
+		if k == kindName {
+			return true
+		}
+	}
+	return false
+}
+
+// extractKindName from 2017-11-14T06:47:01_23208/all_namespaces/kind_Item/all_namespaces_kind_Item.export_metadata like ID value.
+func (obj *GCSPubSubObject) extractKindNameForDatastoreExport(name string) string {
+	if v := strings.LastIndex(name, "."); v != -1 {
+		if name[v:] != ".export_metadata" {
+			return ""
+		}
+	} else {
+		// The expected value is the value of ".export_metadata" at the end, so exclude if there is no.
+		return ""
+	}
+
+	if v := strings.LastIndex(name, "/"); v != -1 {
+		name = name[:v]
+	}
+	if v := strings.LastIndex(name, "/"); v != -1 {
+		name = name[v:]
+	}
+
+	return name[len("/kind_"):]
+}
+
+// extractKindName from agtzfnN0Zy1jaGFvc3JACxIcX0FFX0RhdGFzdG9yZUFkbWluX09wZXJhdGlvbhjx52oMCxIWX0FFX0JhY2t1cF9JbmZvcm1hdGlvbhgBDA.Article.backup_info like ID value.
+func (obj *GCSPubSubObject) extractKindNameForDatastoreAdmin(name string) string {
+	if v := strings.LastIndex(name, "/"); v != -1 {
+		name = name[v:]
+	}
+	vs := strings.Split(name, ".")
+	if len(vs) != 3 {
+		return ""
+	}
+	if vs[2] != "backup_info" {
+		return ""
+	}
+	return vs[1]
+}
+
+// ToBQJobReq creates a new GCSObjectToBQJobReq from the object.
+func (obj *GCSPubSubObject) ToBQJobReq() *GCSObjectToBQJobReq {
+	return &GCSObjectToBQJobReq{
+		//Bucket:      obj.Bucket,
+		Bucket:      obj.Message.Attributes.BucketID,
+		FilePath:    obj.Message.Attributes.ObjectID,
+		KindName:    obj.ExtractKindName(),
+		TimeCreated: obj.Message.PublishTime,
+	}
 }
